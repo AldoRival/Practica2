@@ -7,6 +7,8 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.rmi.Naming;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
@@ -109,20 +111,32 @@ public class RMIApp extends JFrame {
         return textAreaSearchResults; // Asumiendo que los peers se muestran aquí
     }
 
-    private void uploadFile() {
-        JFileChooser fileChooser = new JFileChooser();
-        int selection = fileChooser.showOpenDialog(this);
-        if (selection == JFileChooser.APPROVE_OPTION) {
-            File file = fileChooser.getSelectedFile();
-            try {
-                peer.registerCatalog(file.getName());
-                textAreaSearchResults.append("Archivo subido: " + file.getName() + "\n");
-                updateCatalogs();
-            } catch (RemoteException ex) {
-                ex.printStackTrace();
+private void uploadFile() {
+    JFileChooser fileChooser = new JFileChooser();
+    int selection = fileChooser.showOpenDialog(this);
+    if (selection == JFileChooser.APPROVE_OPTION) {
+        File file = fileChooser.getSelectedFile();
+        try {
+            // Registrar en el catálogo
+            peer.registerCatalog(file.getName());
+            
+            // Copiar el archivo a la carpeta storage
+            File storageDir = new File("storage");
+            if (!storageDir.exists()) {
+                storageDir.mkdir();
             }
+            
+            File destFile = new File(storageDir, file.getName());
+            Files.copy(file.toPath(), destFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            
+            textAreaSearchResults.append("Archivo subido: " + file.getName() + "\n");
+            updateCatalogs();
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            textAreaSearchResults.append("Error al subir el archivo: " + ex.getMessage() + "\n");
         }
     }
+}
 
     private void updateCatalogs() {
         try {
