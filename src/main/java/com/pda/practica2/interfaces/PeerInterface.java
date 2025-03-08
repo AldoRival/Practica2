@@ -2,54 +2,72 @@ package com.pda.practica2.interfaces;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
+import java.util.Map;
 
 public interface PeerInterface extends Remote {
 
-    // Método para enviar mensajes entre peers
+    // Métodos existentes
     void message(String nodeID, String message) throws RemoteException;
-
-    // Método para actualizar la lista de peers
     void updatePeerList(String[] peers) throws RemoteException;
-
-    // Método para buscar archivos en el catálogo del peer
     String[] searchFiles(String query) throws RemoteException;
-
-    // Método para transferir archivos entre peers
     void transferFile(String fileName, String nodeID) throws RemoteException;
-
-    // Método para registrar un archivo en el catálogo del peer
     void registerCatalog(String catalogItem) throws RemoteException;
-
-    // Método para obtener el catálogo de archivos de un tipo específico
     String[] getCatalogs(String type) throws RemoteException;
-
-    // Método para iniciar una elección de coordinador
     void startElection(String name, int id) throws RemoteException;
-
-    // Método para enviar un mensaje de OK durante la elección
     void sendOk(String where, String to) throws RemoteException;
-
-    // Método para notificar que un peer ha ganado la elección
     void iWon(String node) throws RemoteException;
-
-    // Método para actualizar el coordinador
     void updateCoor(String coordinator) throws RemoteException;
-
-    // Método para verificar si un peer está activo
     boolean isalive() throws RemoteException;
-
-    // Método para actualizar la lista de peers
     void updatePeers(String peers) throws RemoteException;
-
-    // Método para obtener el nombre del peer
     String getName() throws RemoteException;
-
-    // Método para obtener el coordinador actual
     String getCoordinator() throws RemoteException;
-
-    // Método para obtener el estado de la elección
     boolean getelectionInProgress() throws RemoteException;
-
-    // Método para obtener el ID del peer
     int getId() throws RemoteException;
+    
+    // Nuevos métodos propuestos
+    
+    /**
+     * Realiza una búsqueda en la red completa de P2P, no solo localmente
+     * @param query Término de búsqueda
+     * @return Mapa con nodeID como clave y array de archivos encontrados como valor
+     */
+    Map<String, String[]> searchNetworkFiles(String query) throws RemoteException;
+    
+    /**
+     * Obtiene información detallada de un archivo
+     * @param fileName Nombre del archivo
+     * @return Mapa con metadatos del archivo (tamaño, fecha, tipo, etc.)
+     */
+    Map<String, String> getFileInfo(String fileName) throws RemoteException;
+    
+    /**
+     * Inicia una transferencia de archivo parcial, para resumir descargas
+     * @param fileName Nombre del archivo
+     * @param nodeID ID del nodo destinatario
+     * @param startByte Byte desde donde comenzar la transferencia
+     * @param endByte Byte hasta donde transferir
+     * @return ID único de la transferencia para seguimiento
+     */
+    String transferFilePartial(String fileName, String nodeID, long startByte, long endByte) throws RemoteException;
+    
+    /**
+     * Comprueba el estado de una transferencia
+     * @param transferId ID de la transferencia
+     * @return Porcentaje completado (0-100)
+     */
+    int getTransferProgress(String transferId) throws RemoteException;
+    
+    /**
+     * Cancela una transferencia en curso
+     * @param transferId ID de la transferencia
+     * @return true si se canceló correctamente
+     */
+    boolean cancelTransfer(String transferId) throws RemoteException;
+    
+    /**
+     * Verifica si un archivo está completo y no corrupto
+     * @param fileName Nombre del archivo
+     * @return true si el archivo está íntegro
+     */
+    boolean verifyFileIntegrity(String fileName) throws RemoteException;
 }

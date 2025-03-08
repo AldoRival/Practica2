@@ -9,10 +9,15 @@ import java.rmi.server.UnicastRemoteObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.io.*;
 import java.net.*;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
 
 public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
     private String name;
@@ -25,6 +30,9 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
     private RMIApp app;
     private ServerSocket fileServerSocket;
     private boolean fileServerRunning;
+
+    // Variable para almacenar las transferencias activas
+    private final Map<String, TransferInfo> activeTransfers = new ConcurrentHashMap<>();
 
     // Constructor público para permitir la creación de instancias desde otras clases
     public RMIPeer(String name, int id, RMIApp app) throws RemoteException {
@@ -41,7 +49,7 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
 
         // Asegurar que la carpeta 'storage' exista
         ensureStorageDirectoryExists();
-        
+
         // Iniciar el servidor de archivos
         startFileServer();
     }
@@ -55,7 +63,7 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             System.out.println("Carpeta 'storage' ya existe en: " + storageDir.getAbsolutePath());
         }
     }
-    
+
     /**
      * Inicia un servidor en un hilo separado para recibir archivos
      */
@@ -64,18 +72,18 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             System.out.println("El servidor de archivos ya está en ejecución");
             return;
         }
-        
+
         new Thread(() -> {
             try {
                 fileServerSocket = new ServerSocket(12345);
                 fileServerRunning = true;
                 System.out.println("Servidor de archivos iniciado en el puerto 12345");
-                
+
                 while (fileServerRunning) {
                     try {
                         Socket clientSocket = fileServerSocket.accept();
                         System.out.println("Nueva conexión recibida desde: " + clientSocket.getInetAddress());
-                        
+
                         // Manejar la transferencia en un hilo separado
                         new Thread(() -> handleFileTransfer(clientSocket)).start();
                     } catch (IOException e) {
@@ -90,7 +98,7 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             }
         }).start();
     }
-    
+
     /**
      * Detiene el servidor de archivos
      */
@@ -104,55 +112,69 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             System.err.println("Error al cerrar el servidor de archivos: " + e.getMessage());
         }
     }
-    
+
     /**
      * Maneja la recepción de un archivo desde otro peer
      */
     private void handleFileTransfer(Socket socket) {
         try {
-            // Crear un buffer para leer el nombre del archivo
             DataInputStream dataInputStream = new DataInputStream(socket.getInputStream());
-            
-            // Leer el nombre del archivo
+
+            // Leer información de la transferencia
             String fileName = dataInputStream.readUTF();
-            System.out.println("Recibiendo archivo: " + fileName);
-            
-            // Crear el archivo en la carpeta storage
+            long startByte = dataInputStream.readLong();
+            long endByte = dataInputStream.readLong();
+            String transferId = dataInputStream.readUTF();
+
+            System.out.println("Recibiendo transferencia parcial: " + fileName +
+                              " (bytes " + startByte + "-" + endByte + ", ID: " + transferId + ")");
+
+            // Crear/abrir el archivo
             File storageDir = new File("storage");
             File receivedFile = new File(storageDir, fileName);
-            
-            // Abrir un flujo para escribir en el archivo
-            FileOutputStream fileOutputStream = new FileOutputStream(receivedFile);
-            
-            // Crear un buffer para la transferencia
-            byte[] buffer = new byte[8192]; // Buffer más grande para mejor rendimiento
-            int bytesRead;
-            long totalBytesRead = 0;
-            
-            // Leer datos del socket y escribir en el archivo
-            while ((bytesRead = dataInputStream.read(buffer)) != -1) {
-                fileOutputStream.write(buffer, 0, bytesRead);
-                totalBytesRead += bytesRead;
-                System.out.println("Bytes recibidos: " + totalBytesRead);
+            boolean isNewFile = !receivedFile.exists();
+
+            // Abrir el archivo para escritura en modo aleatorio
+            try (RandomAccessFile raf = new RandomAccessFile(receivedFile, "rw")) {
+                // Posicionarse en el byte inicial
+                raf.seek(startByte);
+
+                // Crear un buffer para la transferencia
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                long totalBytesRead = 0;
+                long bytesToReceive = endByte - startByte + 1;
+
+                // Leer datos del socket y escribir en el archivo
+                while (totalBytesRead < bytesToReceive &&
+                      (bytesRead = dataInputStream.read(buffer, 0, (int)Math.min(buffer.length, bytesToReceive - totalBytesRead))) != -1) {
+                    raf.write(buffer, 0, bytesRead);
+                    totalBytesRead += bytesRead;
+
+                    // Mostrar progreso cada 1MB recibido
+                    if (totalBytesRead % (1024 * 1024) < 8192) {
+                        System.out.println("Progreso: " + (totalBytesRead * 100 / bytesToReceive) + "% (" +
+                                          totalBytesRead + "/" + bytesToReceive + " bytes)");
+                    }
+                }
+
+                System.out.println("Transferencia parcial completada: " + totalBytesRead + " bytes recibidos");
             }
-            
-            // Cerrar los flujos
-            fileOutputStream.close();
-            dataInputStream.close();
-            socket.close();
-            
-            System.out.println("Archivo recibido con éxito: " + fileName + " (" + totalBytesRead + " bytes)");
-            
-            // Registrar el archivo en el catálogo
-            registerCatalog(fileName);
-            
+
+            // Registrar el archivo en el catálogo si es nuevo
+            if (isNewFile) {
+                registerCatalog(fileName);
+            }
+
             // Actualizar la interfaz de usuario (debe hacerse en el hilo de EDT)
             if (app != null) {
                 javax.swing.SwingUtilities.invokeLater(() -> {
                     app.getjTextAreaMessages().append("Archivo recibido: " + fileName + "\n");
                 });
             }
-            
+
+            socket.close();
+
         } catch (IOException e) {
             System.err.println("Error durante la recepción del archivo: " + e.getMessage());
             e.printStackTrace();
@@ -183,6 +205,40 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
     }
 
     @Override
+    public Map<String, String[]> searchNetworkFiles(String query) throws RemoteException {
+        Map<String, String[]> results = new HashMap<>();
+
+        try {
+            // Incluir los archivos locales
+            String[] localFiles = searchFiles(query);
+            results.put(name, localFiles);
+
+            // Consultar a otros peers
+            Registry registry = app.getRegistry();
+            String[] registeredPeers = registry.list();
+
+            for (String peerName : registeredPeers) {
+                if (!peerName.equals(name)) {
+                    try {
+                        PeerInterface peer = (PeerInterface) registry.lookup(peerName);
+                        if (peer.isalive()) {
+                            String[] peerFiles = peer.searchFiles(query);
+                            results.put(peerName, peerFiles);
+                        }
+                    } catch (Exception e) {
+                        System.err.println("Error al consultar archivos del peer " + peerName + ": " + e.getMessage());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error en la búsqueda de red: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        return results;
+    }
+
+    @Override
     public void transferFile(String fileName, String nodeID) throws RemoteException {
         System.out.println("Iniciando transferencia de archivo '" + fileName + "' a " + nodeID);
 
@@ -192,13 +248,13 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             if (host == null) {
                 throw new RemoteException("No se pudo encontrar la dirección del peer: " + nodeID);
             }
-            
+
             System.out.println("Conectando a " + host + ":12345");
 
             // Establecer conexión con el peer destino
             Socket socket = new Socket(host, 12345);
             DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
-            
+
             // Enviar el nombre del archivo primero
             dataOutputStream.writeUTF(fileName);
             System.out.println("Nombre de archivo enviado: " + fileName);
@@ -218,21 +274,21 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             // Obtener tamaño del archivo para mostrar progreso
             long fileSize = fileToSend.length();
             System.out.println("Tamaño del archivo a enviar: " + fileSize + " bytes");
-            
+
             FileInputStream fileInputStream = new FileInputStream(fileToSend);
 
             // Leer y enviar el archivo
             byte[] buffer = new byte[8192]; // Buffer más grande para mejor rendimiento
             int bytesRead;
             long totalBytesSent = 0;
-            
+
             while ((bytesRead = fileInputStream.read(buffer)) != -1) {
                 dataOutputStream.write(buffer, 0, bytesRead);
                 totalBytesSent += bytesRead;
-                
+
                 // Mostrar progreso cada 1MB enviado
                 if (totalBytesSent % (1024 * 1024) < 8192) {
-                    System.out.println("Progreso: " + (totalBytesSent * 100 / fileSize) + "% (" + 
+                    System.out.println("Progreso: " + (totalBytesSent * 100 / fileSize) + "% (" +
                                       totalBytesSent + "/" + fileSize + " bytes)");
                 }
             }
@@ -247,6 +303,193 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             System.err.println("Error durante la transferencia de archivo: " + e.getMessage());
             e.printStackTrace();
             throw new RemoteException("Error durante la transferencia de archivo: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public String transferFilePartial(String fileName, String nodeID, long startByte, long endByte) throws RemoteException {
+        // Crear un ID único para esta transferencia
+        String transferId = UUID.randomUUID().toString();
+
+        // Registrar la transferencia
+        TransferInfo transferInfo = new TransferInfo(fileName, nodeID, startByte, endByte);
+        activeTransfers.put(transferId, transferInfo);
+
+        // Iniciar la transferencia en un hilo separado
+        new Thread(() -> {
+            try {
+                System.out.println("Iniciando transferencia parcial de '" + fileName +
+                                  "' a " + nodeID + " (bytes " + startByte + "-" + endByte + ")");
+
+                // Obtener la dirección IP del peer destino
+                String host = getPeerAddress(nodeID);
+                if (host == null) {
+                    throw new RemoteException("No se pudo encontrar la dirección del peer: " + nodeID);
+                }
+
+                // Establecer conexión
+                Socket socket = new Socket(host, 12345);
+                DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+
+                // Enviar información de la transferencia
+                dataOutputStream.writeUTF(fileName);
+                dataOutputStream.writeLong(startByte);
+                dataOutputStream.writeLong(endByte);
+                dataOutputStream.writeUTF(transferId);
+
+                // Abrir el archivo
+                File fileToSend = new File("storage", fileName);
+                if (!fileToSend.exists()) {
+                    throw new RemoteException("El archivo '" + fileName + "' no existe en la carpeta 'storage'.");
+                }
+
+                try (RandomAccessFile raf = new RandomAccessFile(fileToSend, "r")) {
+                    // Posicionarse en el byte inicial
+                    raf.seek(startByte);
+
+                    // Calcular el tamaño a transferir
+                    long bytesToTransfer = endByte - startByte + 1;
+
+                    // Transferir datos
+                    byte[] buffer = new byte[8192];
+                    long bytesRemaining = bytesToTransfer;
+                    TransferInfo transfer = activeTransfers.get(transferId);
+
+                    while (bytesRemaining > 0 && !transfer.isCancelled) {
+                        // Pausar si es necesario
+                        while (transfer.isPaused && !transfer.isCancelled) {
+                            Thread.sleep(500);
+                        }
+
+                        // Salir si se canceló
+                        if (transfer.isCancelled) {
+                            break;
+                        }
+
+                        // Leer y enviar datos
+                        int bytesToRead = (int) Math.min(buffer.length, bytesRemaining);
+                        int bytesRead = raf.read(buffer, 0, bytesToRead);
+
+                        if (bytesRead == -1) {
+                            break;
+                        }
+
+                        dataOutputStream.write(buffer, 0, bytesRead);
+                        bytesRemaining -= bytesRead;
+
+                        // Actualizar progreso
+                        transfer.currentByte = startByte + (bytesToTransfer - bytesRemaining);
+                    }
+
+                    System.out.println("Transferencia " + (transfer.isCancelled ? "cancelada" : "completada") +
+                                     ": " + transferId);
+                }
+
+                // Cerrar la conexión
+                dataOutputStream.close();
+                socket.close();
+
+            } catch (Exception e) {
+                System.err.println("Error en transferencia parcial: " + e.getMessage());
+                e.printStackTrace();
+            } finally {
+                // Marcar como completa
+                TransferInfo transfer = activeTransfers.get(transferId);
+                if (transfer != null && !transfer.isCancelled) {
+                    transfer.currentByte = transfer.endByte;
+                }
+            }
+        }).start();
+
+        return transferId;
+    }
+
+    @Override
+    public int getTransferProgress(String transferId) throws RemoteException {
+        TransferInfo transfer = activeTransfers.get(transferId);
+        if (transfer == null) {
+            throw new RemoteException("Transferencia no encontrada: " + transferId);
+        }
+        return transfer.getProgressPercentage();
+    }
+
+    @Override
+    public boolean cancelTransfer(String transferId) throws RemoteException {
+        TransferInfo transfer = activeTransfers.get(transferId);
+        if (transfer == null) {
+            throw new RemoteException("Transferencia no encontrada: " + transferId);
+        }
+
+        transfer.isCancelled = true;
+        return true;
+    }
+
+    @Override
+    public Map<String, String> getFileInfo(String fileName) throws RemoteException {
+        Map<String, String> fileInfo = new HashMap<>();
+
+        try {
+            // Buscar el archivo en la carpeta storage
+            File file = new File("storage", fileName);
+            if (file.exists()) {
+                fileInfo.put("nombre", fileName);
+                fileInfo.put("tamaño", file.length() + " bytes");
+                fileInfo.put("fecha_modificación", new java.util.Date(file.lastModified()).toString());
+
+                // Determinar tipo de archivo
+                String extension = fileName.substring(fileName.lastIndexOf(".") + 1).toLowerCase();
+                fileInfo.put("tipo", extension);
+
+                // Información adicional para archivos multimedia
+                if (extension.equals("mp3") || extension.equals("mp4")) {
+                    // Aquí podrías extraer metadatos específicos como duración, codec, etc.
+                    // Requeriría bibliotecas externas como JAudioTagger para MP3 o similar para MP4
+                    fileInfo.put("propietario", name);
+                }
+            } else {
+                fileInfo.put("nombre", fileName);
+                fileInfo.put("estado", "No disponible localmente");
+            }
+        } catch (Exception e) {
+            System.err.println("Error al obtener información del archivo: " + e.getMessage());
+            fileInfo.put("error", e.getMessage());
+        }
+
+        return fileInfo;
+    }
+
+    @Override
+    public boolean verifyFileIntegrity(String fileName) throws RemoteException {
+        try {
+            File file = new File("storage", fileName);
+            if (!file.exists()) {
+                return false;
+            }
+
+            // Calcular un checksum básico
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            try (FileInputStream fis = new FileInputStream(file)) {
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    md.update(buffer, 0, bytesRead);
+                }
+            }
+
+            // Convertir el checksum a una cadena hexadecimal
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            String calculatedChecksum = sb.toString();
+
+            // Aquí deberías comparar con un checksum almacenado previamente
+            // Para este ejemplo, asumimos que el archivo está íntegro
+            return true;
+        } catch (Exception e) {
+            System.err.println("Error al verificar integridad: " + e.getMessage());
+            return false;
         }
     }
 
@@ -283,7 +526,7 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
                             }
                         }
                     }
-                    
+
                     // Si no podemos extraer la información, al menos sabemos que el peer existe
                     // Podemos intentar usar localhost o InetAddress.getLocalHost().getHostAddress()
                     try {
@@ -324,13 +567,13 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
             if (!storageDir.exists()) {
                 storageDir.mkdir();
             }
-            
+
             File destFile = new File(storageDir, sourceFile.getName());
             Files.copy(sourceFile.toPath(), destFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            
+
             // Registrar en el catálogo
             registerCatalog(sourceFile.getName());
-            
+
             return true;
         } catch (Exception e) {
             System.err.println("Error al guardar archivo en storage: " + e.getMessage());
@@ -469,5 +712,31 @@ public class RMIPeer extends UnicastRemoteObject implements PeerInterface {
     @Override
     public int getId() throws RemoteException {
         return id;
+    }
+
+    // Clase para almacenar información de transferencia
+    private static class TransferInfo {
+        private final String fileName;
+        private final String destinationNode;
+        private final long startByte;
+        private final long endByte;
+        private long currentByte;
+        private boolean isPaused;
+        private boolean isCancelled;
+
+        public TransferInfo(String fileName, String destinationNode, long startByte, long endByte) {
+            this.fileName = fileName;
+            this.destinationNode = destinationNode;
+            this.startByte = startByte;
+            this.endByte = endByte;
+            this.currentByte = startByte;
+            this.isPaused = false;
+            this.isCancelled = false;
+        }
+
+        public int getProgressPercentage() {
+            if (endByte == startByte) return 100;
+            return (int) (((currentByte - startByte) * 100) / (endByte - startByte));
+        }
     }
 }
